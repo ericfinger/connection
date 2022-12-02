@@ -2,9 +2,10 @@ use crate::Cli;
 
 use std::net::{IpAddr, SocketAddr};
 use std::process::Command;
+use std::time::Duration;
 
 use dns_lookup::lookup_host;
-use socket2::{Domain, Socket, Type};
+use socket2::{Domain, Protocol, Socket, Type};
 
 #[allow(dead_code)]
 pub(crate) struct Connection {
@@ -56,16 +57,19 @@ impl Connection {
     }
 
     pub fn execute_knock(&self) {
-        for port in &self.port_sequence {
-            let socket = if self.ip.is_ipv4() {
-                Socket::new(Domain::IPV4, Type::STREAM, None).unwrap()
+        let udp_socket = Socket::new(
+            if self.ip.is_ipv4() {
+                Domain::IPV4
             } else {
-                Socket::new(Domain::IPV6, Type::STREAM, None).unwrap()
-            };
-            socket.set_nonblocking(true).unwrap();
+                Domain::IPV6
+            },
+            Type::DGRAM,
+            Some(Protocol::UDP),
+        )
+        .unwrap();
 
-            let address = SocketAddr::new(self.ip, port.0);
-            let address = address.into();
+        for port in &self.port_sequence {
+            let address = SocketAddr::new(self.ip, port.0).into();
 
             if self.cli.verbose {
                 println!(
@@ -76,11 +80,30 @@ impl Connection {
                 );
             }
 
-            // We expect this to fail, the port is probably closed after all:
-            if socket.connect(&address).is_ok() {}
+            if port.1 {
+                udp_socket.send_to(&[], &address).unwrap();
+            } else {
+                // Sadly, we have to build this socket every time because dropping the refence is the
+                // only way to force-close the connection without relying on connect-timeout jank
+                let tcp_socket = Socket::new(
+                    if self.ip.is_ipv4() {
+                        Domain::IPV4
+                    } else {
+                        Domain::IPV6
+                    },
+                    Type::STREAM,
+                    Some(Protocol::TCP),
+                )
+                .unwrap();
+                tcp_socket.set_nonblocking(true).unwrap();
+                tcp_socket.set_nodelay(true).unwrap();
 
-            drop(socket);
-            std::thread::sleep(std::time::Duration::from_micros(1000 * self.cli.delay));
+                // We expect this to fail, the port is probably closed after all:
+                if tcp_socket.connect(&address).is_ok() {}
+                drop(tcp_socket);
+            }
+
+            std::thread::sleep(Duration::from_micros(1000 * self.cli.delay));
         }
     }
 
