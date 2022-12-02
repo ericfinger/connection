@@ -31,29 +31,29 @@ struct Cli {
     #[arg(short = '6', long)]
     ipv6: bool,
 
-    /// List all presets
-    #[arg(short, long)]
-    list: bool,
-
-    /// Run the Wizard to create a new preset
-    #[arg(long)]
-    new: bool,
-
-    /// Run the wizard to change a preset
-    #[arg(long, value_names = ["name"])]
-    reconfigure: Option<String>,
-
-    /// Delete a preset
-    #[arg(long, value_names = ["name"])]
-    delete: Option<String>,
-
-    /// Delete all presets
-    #[arg(long)]
-    delete_all: bool,
-
     /// Be verbose
     #[arg(short, long)]
     verbose: bool,
+
+    /// List all presets
+    #[arg(short, long, help_heading = Some("Presets"))]
+    list: bool,
+
+    /// Run the Wizard to create a new preset
+    #[arg(long, help_heading = Some("Presets"))]
+    new: bool,
+
+    /// Run the wizard to change a preset
+    #[arg(long, value_names = ["name"], help_heading = Some("Presets"))]
+    reconfigure: Option<String>,
+
+    /// Delete a preset
+    #[arg(long, value_names = ["name"], help_heading = Some("Presets"))]
+    delete: Option<String>,
+
+    /// Delete all presets
+    #[arg(long, help_heading = Some("Presets"))]
+    delete_all: bool,
 }
 
 fn main() {
