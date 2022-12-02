@@ -35,6 +35,10 @@ struct Cli {
     #[arg(short, long)]
     verbose: bool,
 
+    /// Run a command after the knock
+    #[arg(short, long, value_names = ["cmd"])]
+    command: Option<String>,
+
     /// List all presets
     #[arg(short, long, help_heading = Some("Presets"))]
     list: bool,
@@ -61,4 +65,5 @@ fn main() {
 
     let connection = Connection::new(cli);
     connection.execute_knock();
+    connection.exec_cmd();
 }

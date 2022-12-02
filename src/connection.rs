@@ -1,6 +1,7 @@
 use crate::Cli;
 
 use std::net::{IpAddr, SocketAddr};
+use std::process::Command;
 
 use dns_lookup::lookup_host;
 use socket2::{Domain, Socket, Type};
@@ -80,6 +81,23 @@ impl Connection {
 
             drop(socket);
             std::thread::sleep(std::time::Duration::from_micros(1000 * self.cli.delay));
+        }
+    }
+
+    pub fn exec_cmd(self) {
+        if let Some(cmd) = self.cli.command {
+            let mut split = cmd.split(' ');
+            let mut command = Command::new(split.next().unwrap());
+            for arg in split {
+                command.arg(arg);
+            }
+
+            if self.cli.verbose {
+                println!("Executing '{cmd}'");
+            }
+
+            let mut handle = command.spawn().unwrap();
+            handle.wait().unwrap();
         }
     }
 
