@@ -16,9 +16,7 @@ pub(crate) struct Connection {
 
 impl Connection {
     pub fn new(cli: Cli) -> Self {
-        let host = &cli.host;
-
-        // TODO: Check if it's a preset
+        let host = cli.host.as_ref().unwrap();
 
         let mut port_sequence = Vec::new();
         for entry in &cli.ports {

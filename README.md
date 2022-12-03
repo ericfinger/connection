@@ -9,8 +9,9 @@ I like setting up Port-Knocking, with Services such as [knockd](https://github.c
 - [X] Cross-Platform (tested on Windows and Linux)
 - [X] Drop-in-Replacement for [knockd's](https://github.com/jvinet/knock) own 'knock' command
 - [X] Can run a command after the Port-Knock (great for automatically opening SSH connections etc!)
-- [ ] Can be configured with presets:
-  - [ ] Presets are saved in (optionally encrypted!) yaml-Files for portability
-  - [ ] Presets can be generated from a nice CLI Wizard thanks to [inquire](https://github.com/mikaelmello/inquire)
-  - [ ] Run a Preset with ``connection [NAME]``
+- [X] Can be configured with presets:
+  - [X] Run a Preset with ``connection [NAME]``
+  - [X] Presets are saved in toml-Files for portability
+  - [X] Presets can be generated from a nice CLI Wizard thanks to [inquire](https://github.com/mikaelmello/inquire)
+  - [ ] Presets can be encrypted for better security
 
