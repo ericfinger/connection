@@ -1,5 +1,6 @@
 use std::fs::{read_dir, remove_file};
 
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use confy::{get_configuration_file_path, load, store};
 use inquire::{validator::ValueRequiredValidator, Confirm, CustomType, Select, Text};
@@ -65,97 +66,101 @@ struct Cli {
     delete_all: bool,
 }
 
-fn main() {
+fn main() -> Result<()> {
     let mut cli = Cli::parse();
 
     if let Some(name) = &cli.new {
-        create_config(name);
+        create_config(name)?;
         println!(
             "New config successfully created. Try it now with 'connection {}'",
             name
         );
-        return;
+        return Ok(());
     }
 
     if let Some(name) = &cli.reconfigure {
-        if get_configuration_file_path("connection", Some(name.as_ref()))
-            .unwrap()
-            .exists()
-        {
-            create_config(name);
+        if get_configuration_file_path("connection", Some(name.as_ref()))?.exists() {
+            create_config(name)?;
             println!(
-                "Config '{}' successfully reconfigured. Try it now with 'connection {}'",
-                name, name
+                "Config '{name}' successfully reconfigured. Try it now with 'connection {name}'"
             );
         } else {
-            eprintln!("Config '{}' was not found.", name);
+            bail!("Config '{name}' was not found");
         }
-        return;
+        return Ok(());
     }
 
     if let Some(name) = &cli.delete {
-        if let Ok(path) = get_configuration_file_path("connection", Some(name.as_ref())) {
-            if path.exists() {
-                remove_file(path).unwrap();
-                println!("Config '{}' successfully deleted.", name);
-            } else {
-                eprintln!("Config '{}' was not found.", name);
-            }
+        let path = get_configuration_file_path("connection", Some(name.as_ref()))?;
+        if path.exists() {
+            remove_file(&path).context(format!("Could not delete {:?}", path))?;
+            println!("Config '{name}' successfully deleted.");
+        } else {
+            bail!("Config '{name}' was not found");
         }
-        return;
+
+        return Ok(());
     }
 
     if cli.delete_all {
         if !Confirm::new("Are you sure you want to DELETE all Presets?")
             .with_default(false)
-            .prompt()
-            .unwrap()
+            .prompt()?
         {
-            return;
+            return Ok(());
         }
-        let path = get_configuration_file_path("connection", None).unwrap();
-        let path = path.parent().unwrap();
+        let path = get_configuration_file_path("connection", None)?;
+        let path = path
+            .parent()
+            .context(format!("Could not get parent directory of file {:?}", path))?;
 
-        if path.exists() {
-            let files = read_dir(path).unwrap();
-
-            for file in files {
-                remove_file(file.unwrap().path()).unwrap();
-            }
-
-            println!("Successfully Deleted all Presets");
-        } else {
-            println!("No presets found");
+        if !path.exists() {
+            bail!("No Presets found");
         }
-        return;
+
+        let files =
+            read_dir(path).context(format!("Could not read directory content in {:?}", path))?;
+        for file in files {
+            let file_path = file?.path();
+            remove_file(&file_path).context(format!("Could not delete file {:?}", file_path))?;
+        }
+        println!("Successfully Deleted all Presets");
+
+        return Ok(());
     }
 
     if cli.list {
-        let path = get_configuration_file_path("connection", None).unwrap();
-        let path = path.parent().unwrap();
+        let path = get_configuration_file_path("connection", None)?;
+        let path = path
+            .parent()
+            .context(format!("Could not get parent directory of file {:?}", path))?;
 
-        if path.exists() {
-            let files = read_dir(path).unwrap();
-
-            for file in files {
-                println!(
-                    "- {}",
-                    file.unwrap()
-                        .file_name()
-                        .to_str()
-                        .unwrap()
-                        .replace(".toml", "")
-                );
-            }
-        } else {
-            println!("No presets found.");
+        if !path.exists() {
+            bail!("No Presets found");
         }
-        return;
+
+        let files =
+            read_dir(path).context(format!("Could not read directory entries in {:?}", path))?;
+
+        for file in files {
+            let filename = file?.file_name();
+            println!(
+                "- {}",
+                filename
+                    .to_str()
+                    .context(format!(
+                        "Could not convert filename {:?} to string",
+                        filename
+                    ))?
+                    .replace(".toml", "")
+            );
+        }
+
+        return Ok(());
     }
 
     // if a preset exists load it:
-    if get_configuration_file_path("connection", Some(cli.host.as_ref().unwrap().as_ref()))
-        .unwrap()
+    if get_configuration_file_path("connection", Some(cli.host.as_ref().unwrap().as_ref()))?
         .exists()
     {
         if cli.verbose {
@@ -164,33 +169,35 @@ fn main() {
                 cli.host.as_ref().unwrap()
             );
         }
-        cli = load("connection", Some(cli.host.unwrap().as_ref())).unwrap();
+        cli = load("connection", Some(cli.host.as_ref().unwrap().as_ref())).context(format!(
+            "Could not load config file for '{}'",
+            cli.host.as_ref().unwrap()
+        ))?;
     }
 
-    let connection = Connection::new(cli);
-    connection.execute_knock();
-    connection.exec_cmd();
+    let connection = Connection::new(cli)?;
+    connection.execute_knock()?;
+    connection.exec_cmd()?;
+
+    Ok(())
 }
 
-fn create_config(name: &str) {
-    let host = Some(
-        Text::new("Host:")
-            .with_validator(ValueRequiredValidator::default())
-            .prompt()
-            .unwrap(),
-    );
+fn create_config(name: &str) -> Result<()> {
+    let host = Text::new("Host:")
+        .with_validator(ValueRequiredValidator::default())
+        .prompt()?;
+
+    let host = Some(host);
 
     let udp = Confirm::new("Use UDP as default instead of TCP?")
         .with_default(false)
-        .prompt()
-        .unwrap();
+        .prompt()?;
 
     let ports_str = Text::new("Ports:")
         .with_help_message("Space seperated list of Ports to knock on, the protocol can optionally be specified with :tcp or :udp per Port")
         .with_placeholder("1234 5678:udp 9101:tcp")
         .with_validator(ValueRequiredValidator::default())
-        .prompt()
-        .unwrap();
+    .prompt()?;
 
     let mut ports = Vec::new();
     for port in ports_str.split(' ') {
@@ -200,13 +207,10 @@ fn create_config(name: &str) {
     let delay = CustomType::new("Delay:")
         .with_help_message("Delay between Port-hits in milliseconds")
         .with_default(100)
-        .prompt()
-        .unwrap();
+        .prompt()?;
 
     let ipv_options = vec!["Don't care", "IPv4", "IPv6"];
-    let ipv = Select::new("Select the IP Version", ipv_options)
-        .prompt()
-        .unwrap();
+    let ipv = Select::new("Select the IP Version", ipv_options).prompt()?;
 
     let mut ipv4 = false;
     let mut ipv6 = false;
@@ -218,15 +222,14 @@ fn create_config(name: &str) {
 
     let verbose = Confirm::new("Do you want connection to be verbose?")
         .with_default(false)
-        .prompt()
-        .unwrap();
+        .prompt()?;
 
     let mut command = None;
     let cmd = Text::new("Command to run after knocking:")
         .with_help_message("Leave Empty for none")
         .with_placeholder("ssh -p 2222 user@server.com")
-        .prompt()
-        .unwrap();
+        .prompt()?;
+
     if !cmd.is_empty() {
         command = Some(cmd);
     }
@@ -247,5 +250,7 @@ fn create_config(name: &str) {
         delete_all: false,
     };
 
-    store("connection", name, cli).unwrap();
+    store("connection", name, cli).context("Could not store config")?;
+
+    Ok(())
 }
