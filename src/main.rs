@@ -188,6 +188,7 @@ fn main() -> Result<()> {
                 cli.host.as_ref().unwrap()
             ))
             .with_validator(ValueRequiredValidator::default())
+            .without_confirmation()
             .prompt()?;
 
             let crypt = new_magic_crypt!(key, 256);
