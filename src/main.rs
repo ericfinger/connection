@@ -15,7 +15,7 @@ use crate::connection::Connection;
 #[command(version, about, long_about = "A modern Port-Knocking Client")]
 struct Cli {
     /// The host/IP to send the knock to OR the name of a preset
-    #[arg(value_names = ["host | preset"])]
+    #[arg(value_names = ["host | preset"], required_unless_present_any = ["new", "list", "delete", "delete_all"])]
     host: Option<String>,
 
     /// The Sequence of ports, seperated by spaces. Example: 1234 5678:udp 9101:tcp
