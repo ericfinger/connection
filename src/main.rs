@@ -3,14 +3,15 @@ use std::fs::{read_dir, remove_file};
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use confy::{get_configuration_file_path, load, store};
-use inquire::{validator::ValueRequiredValidator, Confirm, CustomType, Select, Text};
+use inquire::{validator::ValueRequiredValidator, Confirm, CustomType, Password, Select, Text};
+use magic_crypt::{new_magic_crypt, MagicCryptTrait};
 use serde::{Deserialize, Serialize};
 
 mod connection;
 #[allow(unused_imports)]
 use crate::connection::Connection;
 
-#[derive(Default, Parser, Serialize, Deserialize)]
+#[derive(Default, Parser, Serialize, Deserialize, Debug)]
 #[command(version, about, long_about = "A modern Port-Knocking Client")]
 struct Cli {
     /// The host/IP to send the knock to OR the name of a preset
@@ -64,6 +65,11 @@ struct Cli {
     /// Delete all presets
     #[arg(long, help_heading = Some("Presets"), exclusive = true)]
     delete_all: bool,
+
+    #[clap(skip)]
+    encrypted: bool,
+    #[clap(skip)]
+    encrypted_content: Option<Vec<u8>>,
 }
 
 fn main() -> Result<()> {
@@ -169,10 +175,29 @@ fn main() -> Result<()> {
                 cli.host.as_ref().unwrap()
             );
         }
-        cli = load("connection", Some(cli.host.as_ref().unwrap().as_ref())).context(format!(
-            "Could not load config file for '{}'",
-            cli.host.as_ref().unwrap()
-        ))?;
+
+        let cli_loaded: Cli = load("connection", Some(cli.host.as_ref().unwrap().as_ref()))
+            .context(format!(
+                "Could not load config file for '{}'",
+                cli.host.as_ref().unwrap()
+            ))?;
+
+        if cli_loaded.encrypted {
+            let key = Password::new(&format!(
+                "Enter the password for config file {}",
+                cli.host.as_ref().unwrap()
+            ))
+            .with_validator(ValueRequiredValidator::default())
+            .prompt()?;
+
+            let crypt = new_magic_crypt!(key, 256);
+            let decrypted_content =
+                crypt.decrypt_bytes_to_bytes(&cli_loaded.encrypted_content.clone().unwrap())?;
+            cli = serde_json::from_str(
+                &String::from_utf8(decrypted_content)
+                    .expect("Could not decode encrypted config as json"),
+            )?;
+        }
     }
 
     let connection = Connection::new(cli)?;
@@ -234,6 +259,10 @@ fn create_config(name: &str) -> Result<()> {
         command = Some(cmd);
     }
 
+    let encrypted = Confirm::new("Do you want to password-protect the config?")
+        .with_default(true)
+        .prompt()?;
+
     let cli = Cli {
         host,
         ports,
@@ -248,7 +277,39 @@ fn create_config(name: &str) -> Result<()> {
         reconfigure: None,
         delete: None,
         delete_all: false,
+        encrypted,
+        encrypted_content: None,
     };
+
+    if encrypted {
+        let key = Password::new("Enter your password:")
+            .with_validator(ValueRequiredValidator::default())
+            .prompt()?;
+
+        let crypt = new_magic_crypt!(key, 256);
+        let json = serde_json::to_string(&cli)?;
+        let encrypted_content = crypt.encrypt_str_to_bytes(json);
+
+        let cli_encrypted = Cli {
+            host: None,
+            ports: Vec::new(),
+            udp: false,
+            delay: 0,
+            ipv4: false,
+            ipv6: false,
+            verbose: false,
+            command: None,
+            list: false,
+            new: None,
+            reconfigure: None,
+            delete: None,
+            delete_all: false,
+            encrypted: true,
+            encrypted_content: Some(encrypted_content),
+        };
+        store("connection", name, cli_encrypted).context("Could not store config")?;
+        return Ok(());
+    }
 
     store("connection", name, cli).context("Could not store config")?;
 
