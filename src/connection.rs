@@ -115,6 +115,10 @@ impl Connection {
     }
 
     pub fn exec_cmd(self) -> Result<()> {
+        if self.cli.no_command {
+            return Ok(());
+        }
+
         if let Some(cmd) = self.cli.command {
             let mut split = cmd.split(' ');
             let mut command = Command::new(split.next().unwrap());

@@ -23,51 +23,59 @@ struct Cli {
     ports: Vec<String>,
 
     /// Make all ports hits use UDP (default is TCP)
-    #[arg(short, long, requires = "host")]
+    #[arg(short, long)]
     udp: bool,
 
     /// Wait <t> milliseconds between Port hits
-    #[arg(short, long, value_names = ["t"], default_value_t = 0, requires = "host")]
+    #[arg(short, long, value_names = ["t"], default_value_t = 0)]
     delay: u64,
 
     /// Force usage of IPv4
-    #[arg(short = '4', long, requires = "host")]
+    #[arg(short = '4', long)]
     ipv4: bool,
 
     /// Force usage of IPv6
-    #[arg(short = '6', long, requires = "host")]
+    #[arg(short = '6', long)]
     ipv6: bool,
 
     /// Be verbose
-    #[arg(short, long, requires = "host")]
+    #[arg(short, long)]
     verbose: bool,
 
     /// Run a command after the knock
-    #[arg(short, long, value_names = ["cmd"], requires = "host")]
+    #[arg(short, long, value_names = ["cmd"])]
     command: Option<String>,
+
+    /// Don't run a command after the knock, even if configured in preset
+    #[arg(short, long)]
+    #[serde(skip_deserializing, skip_serializing)]
+    no_command: bool,
 
     /// List all presets
     #[arg(short, long, help_heading = Some("Presets"), exclusive = true)]
+    #[serde(skip_deserializing, skip_serializing)]
     list: bool,
 
     /// Run the Wizard to create a new preset
     #[arg(long, value_names = ["name"], help_heading = Some("Presets"), exclusive = true)]
+    #[serde(skip_deserializing, skip_serializing)]
     new: Option<String>,
 
     /// Run the wizard to change a preset
     #[arg(long, value_names = ["name"], help_heading = Some("Presets"), exclusive = true)]
+    #[serde(skip_deserializing, skip_serializing)]
     reconfigure: Option<String>,
 
     /// Delete a preset
     #[arg(long, value_names = ["name"], help_heading = Some("Presets"), exclusive = true)]
+    #[serde(skip_deserializing, skip_serializing)]
     delete: Option<String>,
 
     /// Delete all presets
     #[arg(long, help_heading = Some("Presets"), exclusive = true)]
+    #[serde(skip_deserializing, skip_serializing)]
     delete_all: bool,
 
-    #[clap(skip)]
-    encrypted: bool,
     #[clap(skip)]
     encrypted_content: Option<Vec<u8>>,
 }
@@ -176,15 +184,17 @@ fn main() -> Result<()> {
             );
         }
 
+        // This variable will get overwritten on cli soon so we need to snapshot it:
+        let no_comand = cli.no_command;
         let cli_loaded: Cli = load("connection", Some(cli.host.as_ref().unwrap().as_ref()))
             .context(format!(
                 "Could not load config file for '{}'",
                 cli.host.as_ref().unwrap()
             ))?;
 
-        if cli_loaded.encrypted {
+        if let Some(encrypted_content) = cli_loaded.encrypted_content {
             let key = Password::new(&format!(
-                "Enter the password for config file {}",
+                "Enter the password for config file '{}'",
                 cli.host.as_ref().unwrap()
             ))
             .with_validator(ValueRequiredValidator::default())
@@ -192,12 +202,19 @@ fn main() -> Result<()> {
             .prompt()?;
 
             let crypt = new_magic_crypt!(key, 256);
-            let decrypted_content =
-                crypt.decrypt_bytes_to_bytes(&cli_loaded.encrypted_content.clone().unwrap())?;
+            let decrypted_content = crypt
+                .decrypt_bytes_to_bytes(&encrypted_content)
+                .context("Could not decrypt config. Wrong Password?")?;
             cli = serde_json::from_str(
                 &String::from_utf8(decrypted_content)
                     .expect("Could not decode encrypted config as json"),
             )?;
+        } else {
+            cli = cli_loaded;
+        }
+
+        if no_comand {
+            cli.no_command = true;
         }
     }
 
@@ -226,7 +243,7 @@ fn create_config(name: &str) -> Result<()> {
     .prompt()?;
 
     let mut ports = Vec::new();
-    for port in ports_str.split(' ') {
+    for port in ports_str.trim().split(' ') {
         ports.push(port.to_string());
     }
 
@@ -273,12 +290,12 @@ fn create_config(name: &str) -> Result<()> {
         ipv6,
         verbose,
         command,
+        no_command: false,
         list: false,
         new: None,
         reconfigure: None,
         delete: None,
         delete_all: false,
-        encrypted,
         encrypted_content: None,
     };
 
@@ -300,12 +317,12 @@ fn create_config(name: &str) -> Result<()> {
             ipv6: false,
             verbose: false,
             command: None,
+            no_command: false,
             list: false,
             new: None,
             reconfigure: None,
             delete: None,
             delete_all: false,
-            encrypted: true,
             encrypted_content: Some(encrypted_content),
         };
         store("connection", name, cli_encrypted).context("Could not store config")?;
