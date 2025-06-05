@@ -31,11 +31,11 @@ struct Cli {
     delay: u64,
 
     /// Force usage of IPv4
-    #[arg(short = '4', long)]
+    #[arg(short = '4', long, name = "4", conflicts_with("6"))]
     ipv4: bool,
 
     /// Force usage of IPv6
-    #[arg(short = '6', long)]
+    #[arg(short = '6', long, name = "6", conflicts_with("4"))]
     ipv6: bool,
 
     /// Be verbose
