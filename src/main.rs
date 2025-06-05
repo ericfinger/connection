@@ -184,9 +184,7 @@ fn main() -> Result<()> {
             );
         }
 
-        // This variable will get overwritten on cli soon so we need to snapshot it:
-        let no_comand = cli.no_command;
-        let cli_loaded: Cli = load("connection", Some(cli.host.as_ref().unwrap().as_ref()))
+        let mut cli_loaded: Cli = load("connection", Some(cli.host.as_ref().unwrap().as_ref()))
             .context(format!(
                 "Could not load config file for '{}'",
                 cli.host.as_ref().unwrap()
@@ -205,17 +203,35 @@ fn main() -> Result<()> {
             let decrypted_content = crypt
                 .decrypt_bytes_to_bytes(&encrypted_content)
                 .context("Could not decrypt config. Wrong Password?")?;
-            cli = serde_json::from_str(
+            cli_loaded = serde_json::from_str(
                 &String::from_utf8(decrypted_content)
                     .expect("Could not decode encrypted config as json"),
             )?;
-        } else {
-            cli = cli_loaded;
+        };
+
+        // Prioritize CLI switches over config file:
+        cli_loaded.no_command |= cli.no_command;
+        cli_loaded.udp |= cli.udp;
+
+        if cli.ipv4 {
+            cli_loaded.ipv4 = true;
+            cli_loaded.ipv6 = false;
         }
 
-        if no_comand {
-            cli.no_command = true;
+        if cli.ipv6 {
+            cli_loaded.ipv6 = true;
+            cli_loaded.ipv4 = false;
         }
+
+        // Prioritize CLI options over config file:
+        cli_loaded.delay = cli.delay.max(cli_loaded.delay);
+
+        if cli.command.is_some() {
+            cli_loaded.no_command = false;
+            cli_loaded.command = cli.command.clone();
+        }
+
+        cli = cli_loaded;
     }
 
     let connection = Connection::new(cli)?;
