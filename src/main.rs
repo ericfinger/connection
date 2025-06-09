@@ -1,10 +1,16 @@
 use std::fs::{read_dir, remove_file};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use argon2::password_hash::SaltString;
+use argon2::{Argon2, PasswordHasher};
+use chacha20poly1305::aead::rand_core::RngCore;
+use chacha20poly1305::{
+    ChaCha20Poly1305, Nonce,
+    aead::{Aead, KeyInit, OsRng, generic_array::GenericArray},
+};
 use clap::Parser;
 use confy::{get_configuration_file_path, load, store};
 use inquire::{Confirm, CustomType, Password, Select, Text, validator::ValueRequiredValidator};
-use magic_crypt::{MagicCryptTrait, new_magic_crypt};
 use serde::{Deserialize, Serialize};
 
 mod connection;
@@ -75,6 +81,12 @@ struct Cli {
     #[arg(long, help_heading = Some("Presets"), exclusive = true)]
     #[serde(skip_deserializing, skip_serializing)]
     delete_all: bool,
+
+    #[clap(skip)]
+    salt: Option<String>,
+
+    #[clap(skip)]
+    nonce: Option<Vec<u8>>,
 
     #[clap(skip)]
     encrypted_content: Option<Vec<u8>>,
@@ -191,7 +203,7 @@ fn main() -> Result<()> {
             ))?;
 
         if let Some(encrypted_content) = cli_loaded.encrypted_content {
-            let key = Password::new(&format!(
+            let password = Password::new(&format!(
                 "Enter the password for config file '{}'",
                 cli.host.as_ref().unwrap()
             ))
@@ -199,14 +211,32 @@ fn main() -> Result<()> {
             .without_confirmation()
             .prompt()?;
 
-            let crypt = new_magic_crypt!(key, 256);
-            let decrypted_content = crypt
-                .decrypt_bytes_to_bytes(&encrypted_content)
-                .context("Could not decrypt config. Wrong Password?")?;
-            cli_loaded = serde_json::from_str(
-                &String::from_utf8(decrypted_content)
-                    .expect("Could not decode encrypted config as json"),
-            )?;
+            let Some(salt) = cli_loaded.salt else {
+                if let Err(e) =
+                    migrate_encrypted_config(password, &encrypted_content, cli.host.unwrap())
+                {
+                    bail!(
+                        "Could not read salt from encrypted config file: {}",
+                        e.to_string()
+                    );
+                } else {
+                    return Ok(());
+                }
+            };
+
+            let Some(nonce) = cli_loaded.nonce else {
+                bail!("Could not read nonce from encrypted config file!");
+            };
+
+            assert!(nonce.len() == 12);
+            let nonce: [u8; 12] = nonce.try_into().unwrap();
+
+            let salt = SaltString::from_b64(&salt)
+                .map_err(|e| anyhow!("Failed to parse salt: {}", e.to_string()))?;
+
+            let key = derive_key(password, &salt)?;
+
+            cli_loaded = decrypt_config(&encrypted_content, key, nonce)?;
         };
 
         // Prioritize CLI switches over config file:
@@ -313,17 +343,26 @@ fn create_config(name: &str) -> Result<()> {
         reconfigure: None,
         delete: None,
         delete_all: false,
+        salt: None,
+        nonce: None,
         encrypted_content: None,
     };
 
     if encrypted {
-        let key = Password::new("Enter your password:")
+        let password = Password::new("Enter your password:")
             .with_validator(ValueRequiredValidator::default())
             .prompt()?;
 
-        let crypt = new_magic_crypt!(key, 256);
-        let json = serde_json::to_string(&cli)?;
-        let encrypted_content = crypt.encrypt_str_to_bytes(json);
+        // let crypt = new_magic_crypt!(key, 256);
+        // let json = serde_json::to_string(&cli)?;
+        // let encrypted_content = crypt.encrypt_str_to_bytes(json);
+        let salt = SaltString::generate(&mut OsRng);
+        let key_bytes = derive_key(password, &salt)?;
+        // Generate a random 12-byte nonce
+        let mut nonce_bytes = [0u8; 12];
+        OsRng.fill_bytes(&mut nonce_bytes);
+
+        let encrypted_content = create_encrypted_config(&cli, key_bytes, nonce_bytes)?;
 
         let cli_encrypted = Cli {
             host: None,
@@ -340,6 +379,8 @@ fn create_config(name: &str) -> Result<()> {
             reconfigure: None,
             delete: None,
             delete_all: false,
+            salt: Some(salt.to_string()),
+            nonce: Some(nonce_bytes.to_vec()),
             encrypted_content: Some(encrypted_content),
         };
         store("connection", name, cli_encrypted).context("Could not store config")?;
@@ -347,6 +388,114 @@ fn create_config(name: &str) -> Result<()> {
     }
 
     store("connection", name, cli).context("Could not store config")?;
+
+    Ok(())
+}
+
+fn derive_key(password: String, salt: &SaltString) -> Result<[u8; 32]> {
+    let argon2 = Argon2::default();
+
+    let password_hash = argon2
+        .hash_password(password.as_bytes(), salt)
+        .map_err(|e| anyhow!("{}", e.to_string()))
+        .context("Could not hash password")?;
+
+    let hash_bytes = password_hash
+        .hash
+        .expect("Could not get hash-bytes from password hash");
+
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&hash_bytes.as_bytes()[..32]);
+    Ok(key)
+}
+
+fn create_encrypted_config(cli: &Cli, key: [u8; 32], nonce: [u8; 12]) -> Result<Vec<u8>> {
+    let key = GenericArray::clone_from_slice(&key);
+    let nonce = Nonce::from_slice(&nonce);
+    let cipher = ChaCha20Poly1305::new(&key);
+    let encoded_struct = bincode::serde::encode_to_vec(cli, bincode::config::standard())?;
+
+    let encrypted_data = cipher
+        .encrypt(nonce, encoded_struct.as_ref())
+        .map_err(|e| anyhow!("Failed to encrypt data: {}", e.to_string()))
+        .context("Encryption failed")?;
+
+    Ok(encrypted_data)
+}
+
+fn decrypt_config(encrypted_content: &[u8], key: [u8; 32], nonce: [u8; 12]) -> Result<Cli> {
+    let key = GenericArray::clone_from_slice(&key);
+    let cipher = ChaCha20Poly1305::new(&key);
+
+    let cli_encoded = cipher
+        .decrypt(Nonce::from_slice(&nonce), encrypted_content)
+        .map_err(|e| anyhow!("Could not decrypt config file: {}", e.to_string()))?;
+
+    let cli: Cli = bincode::serde::decode_from_slice(&cli_encoded, bincode::config::standard())?.0;
+
+    Ok(cli)
+}
+
+use magic_crypt::{MagicCryptTrait, new_magic_crypt};
+
+/// Migrates an old json+magic_crypt based config to the new bincode+chacha20poly1305 format
+fn migrate_encrypted_config(
+    password: String,
+    encrypted_content: &[u8],
+    config_name: String,
+) -> Result<()> {
+    let migrate = Confirm::new("Your config needs to be migrated. Perform the migration now?")
+        .with_default(true)
+        .prompt()?;
+
+    if !migrate {
+        println!("Migration denied, quitting.");
+        std::process::exit(0);
+    }
+
+    let crypt = new_magic_crypt!(password.clone(), 256);
+    let decrypted_content = crypt
+        .decrypt_bytes_to_bytes(&encrypted_content)
+        .context("Could not decrypt config. Wrong Password?")?;
+    let cli: Cli = serde_json::from_str(
+        &String::from_utf8(decrypted_content).expect("Could not decode encrypted config as json"),
+    )?;
+
+    let salt = SaltString::generate(&mut OsRng);
+    let key_bytes = derive_key(password, &salt)?;
+
+    // Generate a random 12-byte nonce
+    let mut nonce_bytes = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce_bytes);
+
+    let encrypted_content = create_encrypted_config(&cli, key_bytes, nonce_bytes)?;
+
+    let cli_encrypted = Cli {
+        host: None,
+        ports: Vec::new(),
+        udp: false,
+        delay: 0,
+        ipv4: false,
+        ipv6: false,
+        verbose: false,
+        command: None,
+        no_command: false,
+        list: false,
+        new: None,
+        reconfigure: None,
+        delete: None,
+        delete_all: false,
+        salt: Some(salt.to_string()),
+        nonce: Some(nonce_bytes.to_vec()),
+        encrypted_content: Some(encrypted_content),
+    };
+
+    store("connection", config_name.as_ref(), &cli_encrypted).context("Could not store config")?;
+
+    println!(
+        "Successfully migrated config '{}'. You can use it now with 'connection {}'",
+        config_name, config_name
+    );
 
     Ok(())
 }
