@@ -4,15 +4,27 @@ use std::net::{IpAddr, SocketAddr};
 use std::process::Command;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use dns_lookup::lookup_host;
 use socket2::{Domain, Protocol, Socket, Type};
 
-#[allow(dead_code)]
 pub(crate) struct Connection {
-    ip: IpAddr,
-    port_sequence: Vec<(u16, bool)>, // false = tcp
+    target_ip: IpAddr,
+    port_sequence: Vec<SequenceEntry>,
     cli: Cli,
+}
+
+struct SequenceEntry {
+    port: u16,
+    protocol: PortProtocol,
+    payload: Vec<u8>,
+}
+
+#[allow(clippy::upper_case_acronyms)]
+#[derive(strum_macros::Display)]
+enum PortProtocol {
+    TCP,
+    UDP,
 }
 
 impl Connection {
@@ -23,32 +35,45 @@ impl Connection {
         for entry in &cli.ports {
             match entry.split_once(':') {
                 Some(split) => {
-                    if split.1 == "tcp" || split.1 == "udp" {
-                        port_sequence.push((
-                            split
-                                .0
-                                .parse::<u16>()
-                                .context(format!("Given Port '{}' is not valid", split.0))?,
-                            split.1 == "udp",
-                        ));
-                    } else {
-                        bail!("Given port '{}' has invalid protocol '{}'", entry, split.1);
-                    }
+                    let port = split
+                        .0
+                        .parse::<u16>()
+                        .context(format!("Given Port '{}' is not valid", split.0))?;
+                    let protocol = match split.1 {
+                        "tcp" => PortProtocol::TCP,
+                        "udp" => PortProtocol::UDP,
+                        _ => bail!("Given port '{}' has invalid protocol '{}'", entry, split.1),
+                    };
+                    let entry = SequenceEntry {
+                        port,
+                        protocol,
+                        payload: Vec::new(),
+                    };
+                    port_sequence.push(entry);
                 }
                 None => {
                     // No protocol specified, assuming default (tcp unless -u is passed)
-                    port_sequence.push((
-                        entry
-                            .parse::<u16>()
-                            .context(format!("Given Port '{}' is not valid", entry))?,
-                        cli.udp,
-                    ));
+                    let port = entry
+                        .parse::<u16>()
+                        .context(format!("Given Port '{}' is not valid", entry))?;
+
+                    let protocol = if cli.udp {
+                        PortProtocol::UDP
+                    } else {
+                        PortProtocol::TCP
+                    };
+                    let entry = SequenceEntry {
+                        port,
+                        protocol,
+                        payload: Vec::new(),
+                    };
+                    port_sequence.push(entry);
                 }
             }
         }
 
         Ok(Connection {
-            ip: Connection::get_ip(host, cli.ipv4, cli.ipv6)?,
+            target_ip: Connection::get_ip(host, cli.ipv4, cli.ipv6)?,
             port_sequence,
             cli,
         })
@@ -56,7 +81,7 @@ impl Connection {
 
     pub fn execute_knock(&self) -> Result<()> {
         let udp_socket = Socket::new(
-            if self.ip.is_ipv4() {
+            if self.target_ip.is_ipv4() {
                 Domain::IPV4
             } else {
                 Domain::IPV6
@@ -66,46 +91,48 @@ impl Connection {
         )
         .context("Could not create UDP Socket")?;
 
-        for port in &self.port_sequence {
-            let address = SocketAddr::new(self.ip, port.0).into();
+        for entry in &self.port_sequence {
+            let address = SocketAddr::new(self.target_ip, entry.port).into();
 
             if self.cli.verbose {
                 println!(
                     "hitting {} {}:{}",
-                    if port.1 { "udp" } else { "tcp" },
-                    self.ip,
-                    port.0
+                    entry.protocol, self.target_ip, entry.port
                 );
             }
 
-            if port.1 {
-                udp_socket
-                    .send_to(&[], &address)
-                    .context(format!("Could not send data to '{:?}' via UDP", address))?;
-            } else {
-                // Sadly, we have to build this socket every time because dropping the refence is the
-                // only way to force-close the connection without relying on connect-timeout jank
-                let tcp_socket = Socket::new(
-                    if self.ip.is_ipv4() {
-                        Domain::IPV4
-                    } else {
-                        Domain::IPV6
-                    },
-                    Type::STREAM,
-                    Some(Protocol::TCP),
-                )
-                .context("Could not create TCP Socket")?;
+            match entry.protocol {
+                PortProtocol::TCP => {
+                    // Sadly, we have to build this socket every time because dropping the refence is the
+                    // only way to force-close the connection without relying on connect-timeout jank
+                    let tcp_socket = Socket::new(
+                        if self.target_ip.is_ipv4() {
+                            Domain::IPV4
+                        } else {
+                            Domain::IPV6
+                        },
+                        Type::STREAM,
+                        Some(Protocol::TCP),
+                    )
+                    .context("Could not create TCP Socket")?;
 
-                tcp_socket
-                    .set_nonblocking(true)
-                    .context("Could not set TCP Socket to non-blocking")?;
-                tcp_socket
-                    .set_nodelay(true)
-                    .context("Could not set TCP Socket to no-delay")?;
+                    tcp_socket
+                        .set_nonblocking(true)
+                        .context("Could not set TCP Socket to non-blocking")?;
+                    tcp_socket
+                        .set_nodelay(true)
+                        .context("Could not set TCP Socket to no-delay")?;
 
-                // We expect this to fail, the port is probably closed after all:
-                if tcp_socket.connect(&address).is_ok() {}
-                drop(tcp_socket);
+                    // We expect this to fail, the port is probably closed after all:
+                    tcp_socket.connect(&address).ok();
+                    drop(tcp_socket);
+                }
+
+                PortProtocol::UDP => {
+                    udp_socket
+                        .send_to(&entry.payload, &address)
+                        .context(format!("Could not send data to '{:?}' via UDP", address))?;
+                }
             }
 
             std::thread::sleep(Duration::from_micros(1000 * self.cli.delay));
