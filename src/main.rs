@@ -1,10 +1,10 @@
 use std::fs::{read_dir, remove_file};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use confy::{get_configuration_file_path, load, store};
-use inquire::{validator::ValueRequiredValidator, Confirm, CustomType, Password, Select, Text};
-use magic_crypt::{new_magic_crypt, MagicCryptTrait};
+use inquire::{Confirm, CustomType, Password, Select, Text, validator::ValueRequiredValidator};
+use magic_crypt::{MagicCryptTrait, new_magic_crypt};
 use serde::{Deserialize, Serialize};
 
 mod connection;
@@ -210,6 +210,7 @@ fn main() -> Result<()> {
         };
 
         // Prioritize CLI switches over config file:
+        cli_loaded.verbose |= cli.verbose;
         cli_loaded.no_command |= cli.no_command;
         cli_loaded.udp |= cli.udp;
 
